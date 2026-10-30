@@ -1,0 +1,292 @@
+---
+title: "US retail sales: forecasting the next 12 months"
+author: "Olorunmaiye Peter"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    theme: flatly
+execute:
+  warning: false
+  message: false
+---
+
+## Business question
+
+US retailers plan stock, staff and cash a year ahead. **Which store types will grow over the next 12 months, and how far can a forecast be trusted?**
+
+This report forecasts monthly sales for five store types, tests three forecasting methods on two years of sales they had not seen, and uses the most accurate method for each store type.
+
+**Data:** U.S. Census Bureau, Monthly Retail Trade Survey, via FRED (Federal Reserve Bank of St. Louis). Monthly sales in millions of US dollars, not seasonally adjusted, January 2010 onwards.
+
+## 1. Setup
+
+```{r setup}
+library(fpp3)    # tsibble, fable, feasts, dplyr, tidyr, lubridate, ggplot2
+library(readr)
+
+dir.create("charts", showWarnings = FALSE)
+
+gold <- "#b8893b"
+navy <- "#13263f"
+theme_set(theme_minimal(base_size = 12))
+```
+
+## 2. Load and check the data
+
+```{r load}
+labels <- tibble(
+  series_id = c("MRTSSM722USN", "MRTSSM4451USN", "MRTSSM448USN",
+                "MRTSSM452USN", "MRTSSM4541USN"),
+  category  = c("Restaurants and bars", "Grocery stores", "Clothing stores",
+                "General merchandise stores", "Online and mail-order")
+)
+
+raw <- read_csv("data/fred_retail.csv", na = c("", "."), show_col_types = FALSE)
+names(raw)[1] <- "date"
+
+retail <- raw |>
+  pivot_longer(-date, names_to = "series_id", values_to = "sales") |>
+  inner_join(labels, by = "series_id") |>
+  mutate(month = yearmonth(date), sales = sales / 1000) |>   # billions of dollars
+  filter(!is.na(sales), month >= yearmonth("2010 Jan")) |>
+  select(category, month, sales) |>
+  as_tsibble(key = category, index = month)
+
+# The series are published on different dates, so cut them all to the
+# latest month that every series has.
+last_months <- retail |>
+  as_tibble() |>
+  group_by(category) |>
+  summarise(first = min(month), last = max(month), months = n())
+last_months
+
+end_month <- min(last_months$last)
+retail <- retail |> filter(month <= end_month)
+
+cat("Common last month:", format(end_month), "\n")
+cat("Rows:", nrow(retail), " Gaps in any series:", any(has_gaps(retail)$.gaps), "\n")
+```
+
+**Check:** five store types, each starting in 2010 Jan, no gaps.
+
+## 3. Explore
+
+### Sales over time
+
+```{r plot-sales, fig.width = 10, fig.height = 6}
+p_sales <- retail |>
+  ggplot(aes(x = month, y = sales)) +
+  geom_line(colour = navy, linewidth = 0.5) +
+  facet_wrap(~ category, scales = "free_y", ncol = 2) +
+  labs(title = "Monthly sales by store type, 2010 onwards",
+       subtitle = "Billions of US dollars, not seasonally adjusted",
+       x = NULL, y = NULL,
+       caption = "Source: U.S. Census Bureau via FRED")
+p_sales
+ggsave("charts/sales_by_category.png", p_sales, width = 10, height = 6, dpi = 150, bg = "white")
+```
+
+### Growth since before the pandemic
+
+Sales in the latest 12 months against the same 12 months seven years earlier (before COVID-19). These are in current dollars, so part of the growth is inflation.
+
+```{r growth}
+growth <- retail |>
+  as_tibble() |>
+  mutate(period = case_when(
+    month >  end_month - 12                             ~ "latest",
+    month >  end_month - 96 & month <= end_month - 84   ~ "pre_pandemic",
+    TRUE ~ NA_character_)) |>
+  filter(!is.na(period)) |>
+  group_by(category, period) |>
+  summarise(sales = sum(sales), .groups = "drop") |>
+  pivot_wider(names_from = period, values_from = sales) |>
+  mutate(growth_pct = round(100 * (latest / pre_pandemic - 1), 1)) |>
+  arrange(desc(growth_pct))
+
+cat("Latest 12 months end:", format(end_month),
+    "| compared with the 12 months ending", format(end_month - 84), "\n")
+growth
+
+p_growth <- growth |>
+  ggplot(aes(x = growth_pct, y = reorder(category, growth_pct))) +
+  geom_col(fill = gold, width = 0.65) +
+  geom_text(aes(label = paste0(growth_pct, "%")), hjust = -0.15, size = 3.8) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Sales growth in the latest 12 months against seven years earlier",
+       subtitle = "Current dollars, not adjusted for inflation",
+       x = "Growth (%)", y = NULL,
+       caption = "Source: U.S. Census Bureau via FRED")
+p_growth
+ggsave("charts/growth_since_pre_pandemic.png", p_growth, width = 9, height = 4.5, dpi = 150, bg = "white")
+```
+
+### How seasonal is each store type?
+
+```{r seasonality}
+# Strength of trend and of the yearly pattern, from 0 (none) to 1 (very strong)
+strength <- retail |>
+  features(sales, feat_stl) |>
+  select(category, trend_strength, seasonal_strength_year) |>
+  mutate(across(where(is.numeric), \(x) round(x, 2)))
+strength
+
+# Share of the year's sales made in December, last full calendar year
+last_full_year <- year(end_month) - 1
+december_share <- retail |>
+  as_tibble() |>
+  filter(year(month) == last_full_year) |>
+  group_by(category) |>
+  summarise(december_share_pct = round(100 * sum(sales[month(month) == 12]) / sum(sales), 1)) |>
+  arrange(desc(december_share_pct))
+
+cat("December share of", last_full_year, "sales (an even month would be 8.3%):\n")
+december_share
+```
+
+>Online and mail-order sales more than doubled (+121%), from 609 to 1,344 billion dollars between the 12 months to August 2019 and the 12 months to August 2026. Restaurants and bars grew 46% and grocery 34%, while general merchandise (+31%) and clothing (+21%) grew more slowly. These figures are in current dollars, and US consumer prices rose about 30% over the same period, so clothing sales fell in real terms and general merchandise only kept pace with inflation. Clothing is also the most seasonal: December brought in 13.0% of its 2025 sales, against 8.3% for an average month, while grocery (8.8%) and restaurants (8.4%) barely change through the year._
+
+## 4. Test three forecasting methods
+
+The last 24 months are held back. Each method is trained on the data before them, forecasts those 24 months, and is scored against what actually happened.
+
+- **Seasonal naive:** each month equals the same month last year. The simple benchmark to beat.
+- **ETS (exponential smoothing):** weights recent months more heavily and models trend and seasonality.
+- **ARIMA:** models how each month relates to earlier months; fitted on the log of sales so seasonal swings can grow with sales.
+
+```{r test-models}
+test_start <- end_month - 23
+train <- retail |> filter(month < test_start)
+cat("Training:", format(min(train$month)), "to", format(max(train$month)),
+    "| Test:", format(test_start), "to", format(end_month), "\n")
+
+fit_test <- train |>
+  model(
+    `Seasonal naive` = SNAIVE(sales),
+    ETS              = ETS(sales),
+    ARIMA            = ARIMA(log(sales))
+  )
+
+fc_test <- fit_test |> forecast(h = 24)
+
+accuracy_table <- accuracy(fc_test, retail) |>
+  select(category, .model, MAPE, MASE) |>
+  mutate(across(c(MAPE, MASE), \(x) round(x, 2))) |>
+  arrange(category, MAPE)
+accuracy_table
+
+# Average error of each method across the five store types
+accuracy_table |>
+  group_by(.model) |>
+  summarise(mean_MAPE = round(mean(MAPE), 2), mean_MASE = round(mean(MASE), 2)) |>
+  arrange(mean_MAPE)
+```
+
+**MAPE** is the average error as a percentage of actual sales (lower is better). **MASE** compares the error with the seasonal naive benchmark: below 1 means better than the benchmark.
+
+```{r plot-accuracy, fig.width = 9, fig.height = 5}
+p_acc <- accuracy_table |>
+  ggplot(aes(x = MAPE, y = category, fill = .model)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  scale_fill_manual(values = c("Seasonal naive" = "#c9ced6", ETS = navy, ARIMA = gold)) +
+  labs(title = "Forecast error on 24 months the models had not seen",
+       subtitle = "Mean absolute percentage error (MAPE); lower is better",
+       x = "MAPE (%)", y = NULL, fill = NULL,
+       caption = "Source: U.S. Census Bureau via FRED") +
+  theme(legend.position = "top")
+p_acc
+ggsave("charts/accuracy_by_model.png", p_acc, width = 9, height = 5, dpi = 150, bg = "white")
+```
+
+```{r plot-test, fig.width = 10, fig.height = 6}
+p_test <- fc_test |>
+  as_tibble() |>
+  ggplot(aes(x = month)) +
+  geom_line(data = retail |> filter(month >= test_start - 24) |> as_tibble(),
+            aes(y = sales), colour = "black", linewidth = 0.6) +
+  geom_line(aes(y = .mean, colour = .model), linewidth = 0.6) +
+  facet_wrap(~ category, scales = "free_y", ncol = 2) +
+  scale_colour_manual(values = c("Seasonal naive" = "#9aa3ae", ETS = navy, ARIMA = gold)) +
+  labs(title = "Forecasts for the test period against actual sales (black)",
+       x = NULL, y = "Billions of US dollars", colour = NULL) +
+  theme(legend.position = "top")
+p_test
+```
+
+>ETS was the most accurate method overall, with an average error of 3.2% on the 24 months it had not seen, against 5.7% for the seasonal naive benchmark and 8.1% for ARIMA. It was the most accurate for four of the five store types and beat the benchmark for all five. ARIMA was the most accurate for general merchandise (1.3%) but failed for clothing (26.5%), most likely because the collapse in clothing sales during the 2020 lockdowns distorted the model. Clothing was the hardest store type to forecast: even ETS was off by 5.6%, only slightly better than assuming each month repeats the same month last year (6.1%). Testing on unseen months is what revealed these differences._
+
+## 5. Forecast the next 12 months
+
+Each method is refitted on all the data, and for each store type the method with the lowest test error is used.
+
+```{r forecast}
+best <- accuracy_table |>
+  group_by(category) |>
+  slice_min(MAPE, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(category, best_model = .model, test_MAPE = MAPE)
+best
+
+fit_full <- retail |>
+  model(
+    `Seasonal naive` = SNAIVE(sales),
+    ETS              = ETS(sales),
+    ARIMA            = ARIMA(log(sales))
+  )
+
+fc_all <- fit_full |> forecast(h = 12)
+fc_best <- fc_all |>
+  filter(paste(category, .model) %in% paste(best$category, best$best_model))
+
+cat("Forecast months:", format(min(fc_best$month)), "to", format(max(fc_best$month)), "\n")
+
+# Next 12 months against the last 12 months
+outlook <- fc_best |>
+  as_tibble() |>
+  group_by(category, .model) |>
+  summarise(next_12 = sum(.mean), .groups = "drop") |>
+  left_join(retail |> as_tibble() |> filter(month > end_month - 12) |>
+              group_by(category) |> summarise(last_12 = sum(sales)),
+            by = "category") |>
+  left_join(best |> select(category, test_MAPE), by = "category") |>
+  mutate(across(c(next_12, last_12), \(x) round(x, 1)),
+         change_pct = round(100 * (next_12 / last_12 - 1), 1)) |>
+  select(category, model = .model, last_12, next_12, change_pct, test_MAPE) |>
+  arrange(desc(change_pct))
+outlook
+```
+
+```{r plot-forecast, fig.width = 10, fig.height = 6}
+fc_bands <- fc_best |>
+  hilo(level = c(80, 95)) |>
+  unpack_hilo(c(`80%`, `95%`)) |>
+  as_tibble()
+
+history <- retail |> filter(month > end_month - 36) |> as_tibble()
+
+p_fc <- ggplot() +
+  geom_ribbon(data = fc_bands, aes(x = month, ymin = `95%_lower`, ymax = `95%_upper`),
+              fill = gold, alpha = 0.2) +
+  geom_ribbon(data = fc_bands, aes(x = month, ymin = `80%_lower`, ymax = `80%_upper`),
+              fill = gold, alpha = 0.35) +
+  geom_line(data = history, aes(x = month, y = sales), colour = navy, linewidth = 0.6) +
+  geom_line(data = fc_bands, aes(x = month, y = .mean), colour = gold, linewidth = 0.8) +
+  facet_wrap(~ category, scales = "free_y", ncol = 2) +
+  labs(title = "Sales forecast for the next 12 months",
+       subtitle = "Gold line: forecast. Shaded bands: 80% and 95% prediction intervals",
+       x = NULL, y = "Billions of US dollars",
+       caption = "Source: U.S. Census Bureau via FRED. Forecast: best method per store type")
+p_fc
+ggsave("charts/forecast_next_12_months.png", p_fc, width = 10, height = 6, dpi = 150, bg = "white")
+```
+
+>Using the most accurate method for each store type, online sales are forecast to grow fastest over the next 12 months (September 2026 to August 2027), by 6.7% to 1,434 billion dollars, followed by restaurants and bars (+4.7%). Grocery is forecast to be almost flat (+0.9%), which would be a small fall after inflation. Test errors ranged from 1.3% for general merchandise to 5.6% for clothing, so the grocery and general merchandise forecasts can be planned on with more confidence than the clothing forecast. The forecasts use past sales only and would not anticipate a recession or a sudden change in prices._
+
+## 6. Limitations
+
+- Sales are in current dollars, so growth includes price increases, not only more goods sold.
+- The most recent months are early estimates that the Census Bureau may revise.
+- The models use past sales only. A recession, a tariff change or a shock like COVID-19 would not be foreseen.
+- The test covers one 24-month period; another period could rank the methods differently.
