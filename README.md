@@ -6,7 +6,7 @@
 
 **Data:** [U.S. Census Bureau, Monthly Retail Trade Survey](https://www.census.gov/retail/index.html), via [FRED](https://fred.stlouisfed.org/); monthly sales for five store types, January 2010 to August 2026, not seasonally adjusted
 
-**Report:** [`retail_forecast.html`](retail_forecast.html) (download to view) | **Code:** [`retail_forecast.qmd`](retail_forecast.qmd)
+**Read the full report:** [ayanfedara.github.io/us-retail-forecast/retail_forecast.html](https://ayanfedara.github.io/us-retail-forecast/retail_forecast.html) | **Code:** [`retail_forecast.qmd`](retail_forecast.qmd)
 
 ---
 
